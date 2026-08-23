@@ -1,0 +1,105 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "registerMedia",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "mediaHash", "type": "bytes32" },
+      { "name": "verificationId", "type": "string" },
+      { "name": "verdict", "type": "string" },
+      { "name": "confidence", "type": "uint8" },
+      { "name": "mediaType", "type": "string" },
+      { "name": "modelVersion", "type": "string" },
+      { "name": "reportHash", "type": "bytes32" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "verifyMedia",
+    "stateMutability": "view",
+    "inputs": [{ "name": "mediaHash", "type": "bytes32" }],
+    "outputs": [{ "name": "registered", "type": "bool" }]
+  },
+  {
+    "type": "function",
+    "name": "getMediaRecord",
+    "stateMutability": "view",
+    "inputs": [{ "name": "mediaHash", "type": "bytes32" }],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "components": [
+          { "name": "mediaHash", "type": "bytes32" },
+          { "name": "verificationId", "type": "string" },
+          { "name": "verdict", "type": "string" },
+          { "name": "confidence", "type": "uint8" },
+          { "name": "mediaType", "type": "string" },
+          { "name": "modelVersion", "type": "string" },
+          { "name": "reportHash", "type": "bytes32" },
+          { "name": "timestamp", "type": "uint256" },
+          { "name": "registeredBy", "type": "address" },
+          { "name": "exists", "type": "bool" }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "getRecordByVerificationId",
+    "stateMutability": "view",
+    "inputs": [{ "name": "verificationId", "type": "string" }],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "components": [
+          { "name": "mediaHash", "type": "bytes32" },
+          { "name": "verificationId", "type": "string" },
+          { "name": "verdict", "type": "string" },
+          { "name": "confidence", "type": "uint8" },
+          { "name": "mediaType", "type": "string" },
+          { "name": "modelVersion", "type": "string" },
+          { "name": "reportHash", "type": "bytes32" },
+          { "name": "timestamp", "type": "uint256" },
+          { "name": "registeredBy", "type": "address" },
+          { "name": "exists", "type": "bool" }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "totalRegistrations",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "owner",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  },
+  {
+    "type": "event",
+    "name": "MediaRegistered",
+    "anonymous": false,
+    "inputs": [
+      { "name": "mediaHash", "type": "bytes32", "indexed": true },
+      { "name": "verificationId", "type": "string", "indexed": false },
+      { "name": "verdict", "type": "string", "indexed": false },
+      { "name": "confidence", "type": "uint8", "indexed": false },
+      { "name": "mediaType", "type": "string", "indexed": false },
+      { "name": "timestamp", "type": "uint256", "indexed": false },
+      { "name": "registeredBy", "type": "address", "indexed": true }
+    ]
+  }
+]
