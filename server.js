@@ -51,14 +51,16 @@ try {
 }
 
 /* ── MULTER (in-memory upload) ───────────────────────────────── */
+// Accepts images, video, and audio — the forensic pipeline below (SightEngine
+// + Gemini) branches on mimeType, so this filter no longer needs to be
+// image-only. This previously rejected every video/audio upload before it
+// ever reached analyze(), which is why those modes silently failed.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: CONFIG.MAX_FILE_SIZE_MB * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|webp/;
-    const extOk   = allowed.test(path.extname(file.originalname).toLowerCase());
-    const mimeOk  = allowed.test(file.mimetype);
-    cb(extOk && mimeOk ? null : new Error('Only image files allowed'), extOk && mimeOk);
+    const okType = /^(image|video|audio)\//.test(file.mimetype);
+    cb(okType ? null : new Error('Only image, video, or audio files are supported'), okType);
   }
 });
 
@@ -164,6 +166,15 @@ async function runSightEngine(fileBuffer, mimeType) {
     return null;
   }
 
+  // The 'genai' model this project uses is an image-classification model —
+  // sending it video/audio bytes under a fake .jpg filename produced
+  // meaningless (or error) results. Skip it for non-image media and rely on
+  // Gemini alone, which does support video and audio input directly.
+  if (!mimeType.startsWith('image/')) {
+    console.log(`[SightEngine] Skipping — genai model only supports images (got ${mimeType})`);
+    return null;
+  }
+
   try {
     const form = new FormData();
     form.append('media', fileBuffer, { filename: 'image.jpg', contentType: mimeType });
@@ -227,19 +238,56 @@ async function runGemini(imageBase64, mimeType, sightEngineData) {
     if (topGen) seSummary += `, top generator: ${topGen.label} (${(topGen.score * 100).toFixed(1)}%)`;
   }
 
-  // ── Prompt instructs Gemini to return proper objects, not strings ──
-  const prompt = `You are an expert forensic AI image analyst.
+  // ── Media-specific framing ──────────────────────────────────
+  // The old prompt was hardcoded to "image" and image-only cues (skin
+  // texture, bokeh, fingers), which made no sense for video or audio and
+  // is a big part of why those modes looked broken. Branch by mediaType.
+  const mediaKind = mimeType.split('/')[0]; // 'image' | 'video' | 'audio'
 
-Analyze the provided image and determine whether it is AI-generated or a real photograph.
+  const MEDIA_CONFIG = {
+    image: {
+      role:   'expert forensic AI image analyst',
+      task:   'Analyze the provided image and determine whether it is AI-generated or a real photograph.',
+      checks: '5. Check for: smooth skin, perfect symmetry, impossible bokeh, inconsistent shadows, garbled text, extra/missing fingers.',
+      categoryHint: 'e.g. skin texture, lighting, shadows, edges, noise patterns, symmetry, background, text/fingers, color grading, depth of field',
+    },
+    video: {
+      role:   'expert forensic deepfake video analyst',
+      task:   'Analyze the provided video (sampling frames and motion over time as needed) and determine whether it is AI-generated / a deepfake or authentic footage.',
+      checks: `5. Check for: unnatural blinking or lack of blinking, warping around face/hair edges that moves independently of head motion, lip-sync mismatch, morphing/melting artifacts on the face across frames, reflections or occlusions (hands, hair passing in front of the face) that render incorrectly.
+6. IMPORTANT — do NOT treat ordinary capture-quality issues as AI signals. Cheap or low-light webcam footage routinely has: blown-out/overexposed backlighting, uneven or harsh lighting on the face, low frame rate (judder/stepping in motion), block/mosquito compression artifacts, sensor noise/grain, and slightly inconsistent shadow softness. None of these alone indicate AI generation — real amateur webcam and phone recordings look exactly like this. Only flag lighting/shadow/motion issues if they are physically inconsistent in a way normal capture cannot produce (e.g. a shadow falling the wrong direction relative to the visible light source, a reflection missing entirely, motion that violates anatomy).`,
+      categoryHint: 'e.g. facial warping independent of head motion, blink rate, lip-sync accuracy, face-region morphing across frames, physically-impossible reflections/shadows, anatomically incorrect motion',
+    },
+    audio: {
+      role:   'expert forensic synthetic-speech analyst',
+      task:   'Analyze the provided audio clip and determine whether the voice is AI-generated / synthetic (voice clone, TTS) or authentic human speech.',
+      checks: '5. Check for: unnatural prosody or flat intonation, missing breaths/mouth sounds, robotic or metallic timbre, unnatural pacing or word timing, spectral artifacts, inconsistent background noise or room tone, mispronunciations typical of TTS.',
+      categoryHint: 'e.g. prosody/intonation, breathing sounds, timbre naturalness, pacing, background noise consistency, pronunciation artifacts, pitch stability',
+    },
+  }[mediaKind] || MEDIA_CONFIG_IMAGE_FALLBACK();
+
+  function MEDIA_CONFIG_IMAGE_FALLBACK() {
+    return {
+      role:   'expert forensic AI media analyst',
+      task:   'Analyze the provided media and determine whether it is AI-generated or authentic.',
+      checks: '5. Check for any artifacts typical of AI generation for this media type.',
+      categoryHint: 'e.g. any distinct, media-appropriate forensic signal',
+    };
+  }
+
+  // ── Prompt instructs Gemini to return proper objects, not strings ──
+  const prompt = `You are an ${MEDIA_CONFIG.role}.
+
+${MEDIA_CONFIG.task}
 
 ${seSummary ? `EXTERNAL SIGNAL (high-weight forensic evidence):\n${seSummary}\n` : ''}
 
 DETECTION RULES:
-1. Look for a small 4-pointed star (✦) watermark — this is Google SynthID. If found: verdict="ai", estimatedGenerator="Google Imagen / Gemini".
+1. Look for a small 4-pointed star (✦) watermark on visual frames — this is Google SynthID. If found: verdict="ai", estimatedGenerator="Google Imagen / Gemini".
 2. If SightEngine shows ai_generated >= 0.5, heavily weight toward "ai".
 3. If SightEngine identifies a generator with score >= 0.3, use it as estimatedGenerator.
-4. Do NOT let photorealism override forensic signals.
-5. Check for: smooth skin, perfect symmetry, impossible bokeh, inconsistent shadows, garbled text, extra/missing fingers.
+4. Do NOT let surface realism override forensic signals — but the reverse also applies: do NOT let the requirement to list indicators below push you toward "ai". Decide verdict/aiProbability FIRST, based purely on what you actually observe, and only then write the indicator lists to justify that decision. The lists always need entries (see STRICT RULES), but for genuinely authentic media those "aiIndicators" entries should read as weak/circumstantial and get severity "Low" — never let their required presence inflate aiProbability or flip the verdict.
+${MEDIA_CONFIG.checks}
 
 RESPONSE FORMAT: Return ONLY a raw JSON object — no prose, no markdown backticks.
 
@@ -260,12 +308,13 @@ RESPONSE FORMAT: Return ONLY a raw JSON object — no prose, no markdown backtic
 }
 
 STRICT RULES:
-- aiIndicators MUST have at least 4 entries — each describing a DIFFERENT forensic signal (e.g. skin texture, lighting, shadows, edges, noise patterns, symmetry, background, text/fingers, color grading, depth of field).
-- realIndicators MUST have at least 3 entries — each describing a DIFFERENT authentic characteristic found in the image.
+- aiIndicators MUST have at least 4 entries — each describing a DIFFERENT forensic signal (${MEDIA_CONFIG.categoryHint}). These are candidate/weak observations, NOT proof of AI generation — for media you judge to be authentic, these entries should be minor, hedged, and marked severity "Low", reflecting that they are far outweighed by the realIndicators.
+- realIndicators MUST have at least 3 entries — each describing a DIFFERENT authentic characteristic found in the media. For genuinely authentic amateur/consumer-grade footage, this includes ordinary capture imperfections (sensor noise, uneven lighting, low frame rate, natural asymmetry, compression artifacts) — these are POSITIVE evidence of authenticity, not neutral.
 - Do NOT repeat the same observation in multiple entries. Each entry must be a unique, distinct forensic finding.
 - Every entry MUST have name (2-4 words), severity, and description (full sentence).
 - NEVER use null, "Unknown", or empty string for name or description.
-- name must describe the actual signal, e.g. "Skin Texture Smoothness", "Perfect Symmetry", "Lighting Inconsistency".`;
+- name must describe the actual signal appropriate to this media type.
+- The required minimum entry counts above are a formatting requirement, not a signal — never let needing to fill 4 aiIndicators talk yourself into a higher aiProbability or an "ai"/"uncertain" verdict for media that otherwise looks authentic.`;
 
   function parseRetryDelay(msg) {
     const match = msg.match(/"retryDelay"\s*:\s*"([\d.]+)s"/);
@@ -333,7 +382,7 @@ STRICT RULES:
 /* ================================================================
    MERGE RESULTS
    ================================================================ */
-function mergeResults(geminiResult, sightEngineData) {
+function mergeResults(geminiResult, sightEngineData, mediaKind = 'image') {
   const seScore = sightEngineData?.type?.ai_generated !== undefined
     ? Math.round(sightEngineData.type.ai_generated * 100)
     : null;
@@ -385,14 +434,14 @@ function mergeResults(geminiResult, sightEngineData) {
       geminiResult.aiIndicators.push({
         name:        topGen ? `Detected: ${topGen.label}` : 'AI Pattern Detected',
         severity:    'Medium',
-        description: `Image shows characteristics consistent with AI generation (${geminiResult.aiProbability}% probability).`,
+        description: `${mediaKind === 'video' ? 'Video shows' : mediaKind === 'audio' ? 'Audio shows' : 'Image shows'} characteristics consistent with AI generation (${geminiResult.aiProbability}% probability).`,
       });
     }
     if (geminiResult.realIndicators.length === 0) {
       geminiResult.realIndicators.push({
         name:        'Authentic Characteristics',
         severity:    'Low',
-        description: `Image shows some characteristics consistent with authentic photography (${100 - geminiResult.aiProbability}% human probability).`,
+        description: `${mediaKind === 'video' ? 'Video shows' : mediaKind === 'audio' ? 'Audio shows' : 'Image shows'} some characteristics consistent with authentic ${mediaKind === 'video' ? 'footage' : mediaKind === 'audio' ? 'recording' : 'photography'} (${100 - geminiResult.aiProbability}% human probability).`,
       });
     }
 
@@ -443,7 +492,7 @@ async function analyze(fileBuffer, mimeType) {
   const base64          = fileBuffer.toString('base64');
   const sightEngineData = await runSightEngine(fileBuffer, mimeType);
   const geminiResult    = await runGemini(base64, mimeType, sightEngineData);
-  const result          = mergeResults(geminiResult, sightEngineData);
+  const result          = mergeResults(geminiResult, sightEngineData, mimeType.split('/')[0]);
   result.mediaType      = mimeType.split('/')[0].toUpperCase();
   console.log(`[Alethia] Verdict: ${result.verdict} (${result.aiProbability}% AI)`);
 
@@ -505,8 +554,8 @@ app.post('/api/analyze/url', async (req, res) => {
     });
 
     const mimeType = (response.headers['content-type'] || '').split(';')[0].trim();
-    if (!mimeType.startsWith('image/'))
-      return res.status(400).json({ error: `URL did not return an image (got: ${mimeType})` });
+    if (!/^(image|video|audio)\//.test(mimeType))
+      return res.status(400).json({ error: `URL did not return an image, video, or audio file (got: ${mimeType})` });
 
     res.json(await analyze(Buffer.from(response.data), mimeType));
   } catch (err) {
@@ -649,4 +698,3 @@ app.listen(PORT, () => {
   console.log(`   BLOCKCHAIN_NETWORK=sepolia`);
   console.log(`   ALCHEMY_API_KEY=...\n`);
 });
-
